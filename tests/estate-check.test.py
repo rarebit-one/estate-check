@@ -87,6 +87,43 @@ class EstateCheck(unittest.TestCase):
         d = repo({"CLAUDE.md": "# x\n"})
         self.assertIn(("portability.agents-md", "info"), rules(d))
 
+    def test_dir_symlink_aliases_paths(self):
+        d = repo({**CLEAN, ".agents/skills/ship/SKILL.md":
+                  "---\nname: ship\n---\nSee `.claude/skills/ship/SKILL.md` and `.claude/skills/gone/SKILL.md`.\n"})
+        (d / ".claude/skills").symlink_to("../.agents/skills")
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        dead = [f["message"].split("`")[1] for f in ec.check(d) if f["rule"] == "paths.dead"]
+        self.assertEqual(dead, [".claude/skills/gone/SKILL.md"])  # the real path resolves; the missing one is still flagged
+        self.assertEqual(sum(f["file"].startswith(".claude/skills/") for f in ec.check(d)), 0)  # nothing linted twice
+
+    def test_nested_dir_symlinks(self):
+        # .claude/skills -> ../.agents/skills, and inside it a per-skill link to shared/ship
+        d = repo({**CLEAN, "shared/ship/SKILL.md": "x\n", ".agents/skills/local/SKILL.md": "y\n",
+                  "AGENTS.md": "See `.claude/skills/ship/SKILL.md` and `.claude/skills/nope.md`.\n"})
+        (d / ".agents/skills/ship").symlink_to("../../shared/ship")
+        (d / ".claude").mkdir(exist_ok=True)
+        (d / ".claude/skills").symlink_to("../.agents/skills")
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        dead = [f["message"].split("`")[1] for f in ec.check(d) if f["rule"] == "paths.dead"]
+        self.assertEqual(dead, [".claude/skills/nope.md"])
+
+    def test_symlink_to_repo_root(self):
+        d = repo({**CLEAN, "AGENTS.md": "See `mirror/bin/test` and `mirror/bin/missing`.\n"})
+        (d / "mirror").symlink_to(".")
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+        dead = [f["message"].split("`")[1] for f in ec.check(d) if f["rule"] == "paths.dead"]
+        self.assertEqual(dead, ["mirror/bin/missing"])
+
+    def test_dir_symlink_in_non_git_workspace(self):
+        d = Path(tempfile.mkdtemp())
+        (d / ".agents/skills/ship").mkdir(parents=True)
+        (d / ".agents/skills/ship/SKILL.md").write_text("x\n")
+        (d / "AGENTS.md").write_text("See `.claude/skills/ship/SKILL.md` and `.claude/skills/nope.md`.\n")
+        (d / ".claude").mkdir()
+        (d / ".claude/skills").symlink_to("../.agents/skills")
+        dead = [f["message"].split("`")[1] for f in ec.check(d, workspace=True) if f["rule"] == "paths.dead"]
+        self.assertEqual(dead, [".claude/skills/nope.md"])
+
     def test_hook_drift_only_with_hooks_dir(self):
         canon = Path(tempfile.mkdtemp())
         (canon / "guard.sh").write_text("#!/bin/sh\nexit 0\n")
