@@ -67,6 +67,9 @@ def tracked_files(root):
                   and not d.endswith(".pre-wsc.bak")
                   and not os.path.exists(os.path.join(dp, d, ".git"))]
         files += [os.path.relpath(os.path.join(dp, f), root) for f in fns]
+        # os.walk lists a directory symlink as a dir and never enters it; record it
+        # as an entry, like git ls-files does, so path lookups can resolve through it.
+        files += [os.path.relpath(os.path.join(dp, d), root) for d in dns if os.path.islink(os.path.join(dp, d))]
     return files, False
 
 
@@ -93,6 +96,28 @@ def check(root, workspace=False, links=None, hooks_dir=None):
     fileset = set(files)
     dirs = {"/".join(f.split("/")[:k]) for f in files for k in range(1, f.count("/") + 1)}
     tops = {f.split("/", 1)[0] for f in files}
+    # A tracked symlink to a directory inside the repo (e.g. .claude/skills ->
+    # ../.agents/skills) makes every file under its target reachable at the link
+    # path too, transitively through nested links. Only path lookups see these
+    # aliases; no file is linted twice.
+    links = []
+    for rel in files:
+        p = root / rel
+        if not (p.is_symlink() and p.is_dir()):
+            continue
+        try:
+            target = p.resolve().relative_to(root).as_posix()
+        except ValueError:
+            continue  # points outside the repo
+        links.append((rel, "" if target == "." else target + "/"))
+    for _ in range(4):  # bounded: a link to an ancestor would otherwise nest forever
+        new = {rel + "/" + f[len(t):] for rel, t in links for f in fileset if f.startswith(t) and f != rel} - fileset
+        if not new:
+            break
+        fileset |= new
+        for alias in new:
+            dirs.update("/".join(alias.split("/")[:k]) for k in range(1, alias.count("/") + 1))
+    dirs.update(rel for rel, _ in links)
     out = []
 
     # --- budgets -------------------------------------------------------------
