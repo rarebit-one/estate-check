@@ -1,0 +1,21 @@
+name: Pin Gate
+
+# Thin caller for the org-shared Actions-pinning gate in rarebit-one/.github.
+# It is also this repo's required status check, so `gh pr merge --auto` waits
+# for CI instead of merging the instant a PR is mergeable.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+concurrency:
+  group: pin-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pin-check:
+    permissions:
+      contents: read
+    uses: rarebit-one/.github/.github/workflows/pin-check.yml@main
