@@ -17,7 +17,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Unit tests
-        run: python3 tests/estate-check.test.py
+        run: |
+          python3 tests/estate-check.test.py
+          python3 tests/estate-sync.test.py
 
       - name: Action passes on this repo (enforce)
         uses: ./
@@ -41,3 +43,25 @@ jobs:
         env:
           OUTCOME: ${{ steps.bad.outcome }}
         run: '[[ "$OUTCOME" == failure ]] || { echo "::error::enforce mode passed a repo with a bare Bash allow"; exit 1; }'
+
+      # Same for the sync.* rules: a vendored hook edited after it was locked.
+      - name: Build a drifted estate-sync fixture
+        run: |
+          mkdir -p "$RUNNER_TEMP/drift/.agents/hooks" && cd "$RUNNER_TEMP/drift"
+          printf '#!/bin/sh\n' > .agents/hooks/guard.sh && chmod +x .agents/hooks/guard.sh
+          printf 'version = 1\n[[hook]]\nid = "guard"\nevents = [{ on = "stop" }]\n' > .agents/hooks.toml
+          printf 'version = 1\ntargets = ["claude"]\n[vendored]\nguard = "sha256:%s"\n' "$(sha256sum .agents/hooks/guard.sh | cut -d' ' -f1)" > .agents/estate.lock
+          python3 "$GITHUB_WORKSPACE/estate-sync.py" . && python3 "$GITHUB_WORKSPACE/estate-sync.py" --check .
+          echo 'exit 0' >> .agents/hooks/guard.sh
+          git init -q && git add -A
+      - name: Action fails on the drifted fixture (enforce)
+        id: drift
+        continue-on-error: true
+        uses: ./
+        with:
+          mode: enforce
+          path: ${{ runner.temp }}/drift
+      - name: Assert the sync negative control failed
+        env:
+          OUTCOME: ${{ steps.drift.outcome }}
+        run: '[[ "$OUTCOME" == failure ]] || { echo "::error::enforce mode passed an edited vendored hook"; exit 1; }'

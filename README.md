@@ -5,7 +5,7 @@ permission rules that pre-approve bypasses, agent steps in CI that allow any bot
 or any shell command, unpinned MCP servers, and paths that only exist on one
 laptop.
 
-It is one stdlib-only Python file. It only reads, never writes, and needs
+The check is one stdlib-only Python file. It only reads, never writes, and needs
 nothing installed beyond `python3`, which every GitHub-hosted runner has.
 
 ## Use it in a workflow
@@ -73,15 +73,51 @@ required, once it comes up clean.
 | `hooks.dangling` | error | a workspace hook symlink that resolves to nothing |
 | `portability.agents-md` | info | a `CLAUDE.md` with no `AGENTS.md` |
 | `skills.model-pin` | info | a `SKILL.md` pinning a vendor model in frontmatter |
+| `sync.drift` | error | a file `estate-sync` renders differs from its canonical source |
+| `sync.vendored` | error | a vendored estate hook is missing, hand-edited, not executable, or absent from the lock |
+| `sync.skills` | error | `.claude/skills` is not a symlink to `../.agents/skills` |
+| `sync.spec` | error | `.agents/estate.lock` or `.agents/hooks.toml` is invalid |
+
+The `sync.*` rules run only in repos that have `.agents/estate.lock` (see below),
+and need Python 3.11+ for `tomllib`.
 
 Budgets are line counts, and tokens are estimated as characters ÷ 4. Short,
 router-style instruction files are followed more reliably than long ones.
 Procedures belong in skills, and rules belong in hooks or CI.
 
+## estate-sync: render per-vendor files
+
+`estate-sync.py` writes a repo's per-vendor agent files from its canonical,
+vendor-neutral ones. The `sync.*` rules above check that the rendered files still
+match their sources, so a hand edit to a rendered file shows up in CI.
+
+| Canonical (hand-written) | Rendered (committed) |
+|---|---|
+| `.agents/hooks.toml`: `[[hook]]` with `id`, optional `run` and `timeout`, and `events = [{ on, tools }]` | `.claude/settings.json`, only the `hooks` key and `env.CLAUDE_WS_ORG`; every other key is left alone |
+| `.agents/estate.lock`: `org`, `targets`, the agent-estate commit, and a sha256 for each vendored hook | `.agents/hooks/<id>.sh`, estate hooks copied from agent-estate |
+| `.agents/skills/` | `.claude/skills` → `../.agents/skills` |
+
+Events are `session_start`, `pre_tool`, `post_tool` and `stop`. Tool classes are
+`edit`, `write`, `notebook` and `bash`. A hook with `run` is repo-local; a hook
+without it is an estate hook, vendored at `.agents/hooks/<id>.sh`.
+
+```bash
+./estate-sync.py --init --estate ../agent-estate PATH   # convert today's .claude/settings.json hooks
+./estate-sync.py PATH                                   # re-render after editing hooks.toml or the lock
+./estate-sync.py --estate ../agent-estate PATH          # also pull newer estate hooks, updating the lock
+./estate-sync.py --check PATH                           # drift only; exit 1 on any
+```
+
+The only target so far is `claude`. The loaders for Codex, opencode and qwen
+are added one at a time, each once that vendor's loading has been checked. For
+example, Codex ignores a project's `.codex/config.toml` and hooks until the
+folder is trusted interactively, and every hook needs its own approval.
+
 ## Develop
 
 ```bash
 python3 tests/estate-check.test.py
+python3 tests/estate-sync.test.py
 ```
 
 CI runs the tests, then runs the action against this repo in `enforce` mode. As

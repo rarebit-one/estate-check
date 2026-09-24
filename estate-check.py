@@ -26,6 +26,11 @@ Exit 1 when any `error` finding exists (unless --report). Rules, by id:
   mcp.unpinned         an MCP server launched from an unpinned (@latest / bare) package
   hooks.drift          a committed hook copy differs from the canonical copy (needs --hooks-dir)
   hooks.dangling       a hook symlink resolves to nothing (workspace mode)
+  sync.drift           a file estate-sync renders differs from its canonical source
+  sync.vendored        a vendored estate hook is missing, edited, or not in the lock
+  sync.skills          .claude/skills is not the link to .agents/skills
+  sync.spec            .agents/estate.lock or .agents/hooks.toml is invalid
+                       (sync.* rules run only in repos that have .agents/estate.lock)
   portability.agents-md  CLAUDE.md without AGENTS.md (info)
   skills.model-pin     a SKILL.md pins a vendor model in frontmatter (info)
 
@@ -229,7 +234,7 @@ def check(root, workspace=False, links=None, hooks_dir=None):
 
     # --- hooks ---------------------------------------------------------------
     for rel in files:
-        if not rel.startswith(".claude/hooks/") or rel.count("/") != 2:
+        if not rel.startswith((".claude/hooks/", ".agents/hooks/")) or rel.count("/") != 2:
             continue
         p = root / rel
         canon = Path(hooks_dir) / p.name if hooks_dir else None
@@ -239,7 +244,20 @@ def check(root, workspace=False, links=None, hooks_dir=None):
             continue
         if canon and canon.is_file() and p.is_file() and p.read_bytes() != canon.read_bytes():
             out.append(finding("hooks.drift", "warn", rel, None, f"differs from the canonical {canon}"))
+
+    # --- rendered files (estate-sync) ----------------------------------------
+    if not workspace:
+        out += _estate_sync().check(root)
     return out
+
+
+def _estate_sync():
+    """estate-sync.py sits beside this file; its hyphenated name needs importlib."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("estate_sync", Path(__file__).resolve().parent / "estate-sync.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 SEV_ORDER = {"error": 0, "warn": 1, "info": 2}
