@@ -1,0 +1,43 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Unit tests
+        run: python3 tests/estate-check.test.py
+
+      - name: Action passes on this repo (enforce)
+        uses: ./
+        with:
+          mode: enforce
+
+      # Negative control: the action must fail on a repo with an error finding,
+      # otherwise a green run above proves nothing.
+      - name: Build a bad fixture
+        run: |
+          mkdir -p "$RUNNER_TEMP/bad/.claude" && cd "$RUNNER_TEMP/bad"
+          git init -q && echo '{"permissions":{"allow":["Bash"]}}' > .claude/settings.json && git add -A
+      - name: Action fails on the bad fixture (enforce)
+        id: bad
+        continue-on-error: true
+        uses: ./
+        with:
+          mode: enforce
+          path: ${{ runner.temp }}/bad
+      - name: Assert the negative control failed
+        env:
+          OUTCOME: ${{ steps.bad.outcome }}
+        run: '[[ "$OUTCOME" == failure ]] || { echo "::error::enforce mode passed a repo with a bare Bash allow"; exit 1; }'

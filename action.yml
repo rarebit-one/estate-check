@@ -1,0 +1,37 @@
+name: estate-check
+description: Lint a repo's AI-agent configuration (instruction budgets, permission bypasses, CI agent-step hygiene, MCP pinning).
+author: rarebit-one
+branding:
+  icon: check-square
+  color: blue
+
+inputs:
+  mode:
+    description: "report (annotate, never fail) or enforce (fail on any error finding)"
+    default: report
+  path:
+    description: Directory to check, relative to the workspace. Must be a git checkout.
+    default: "."
+  workspace:
+    description: "true to check an org workspace root (tighter budgets)"
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: estate-check
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        TARGET: ${{ inputs.path }}
+        WS: ${{ inputs.workspace }}
+      run: |
+        set -euo pipefail
+        args=(--format github)
+        case "$MODE" in
+          report) args+=(--report) ;;
+          enforce) ;;
+          *) echo "::error title=estate-check::mode must be 'report' or 'enforce', got '$MODE'"; exit 2 ;;
+        esac
+        [[ "$WS" == "true" ]] && args+=(--workspace)
+        python3 "$GITHUB_ACTION_PATH/estate-check.py" "${args[@]}" "$TARGET"
