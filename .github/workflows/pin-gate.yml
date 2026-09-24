@@ -1,8 +1,7 @@
 name: Pin Gate
 
 # Thin caller for the org-shared Actions-pinning gate in rarebit-one/.github.
-# It is also this repo's required status check, so `gh pr merge --auto` waits
-# for CI instead of merging the instant a PR is mergeable.
+# Satisfies the org ruleset that requires `pin-check / Actions pinning gate`.
 
 on:
   pull_request:
