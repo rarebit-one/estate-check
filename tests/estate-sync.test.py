@@ -250,6 +250,15 @@ class VendoredFiles(unittest.TestCase):
         self.assertEqual(self.vendor(), [".github/workflows/deploy-production.yml", ".agents/estate.lock"])
         self.assertEqual(es.check(self.repo), [])
 
+    def test_executable_bit_follows_the_source_both_ways(self):
+        wf = ".github/workflows/deploy-production.yml"
+        (self.src / wf).chmod(0o755)
+        self.vendor()
+        self.assertTrue(os.access(self.repo / wf, os.X_OK))
+        (self.src / wf).chmod(0o644)
+        self.assertEqual(self.vendor(), [wf], "a mode-only change is reported")
+        self.assertFalse(os.access(self.repo / wf, os.X_OK))
+
     def test_unknown_source_and_bad_paths_are_spec_errors(self):
         with self.assertRaises(es.SpecError):
             es.sync(self.repo, sources={"someone/else": str(self.src)})
