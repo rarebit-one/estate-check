@@ -74,7 +74,7 @@ required, once it comes up clean.
 | `portability.agents-md` | info | a `CLAUDE.md` with no `AGENTS.md` |
 | `skills.model-pin` | info | a `SKILL.md` pinning a vendor model in frontmatter |
 | `sync.drift` | error | a file `estate-sync` renders differs from its canonical source |
-| `sync.vendored` | error | a vendored estate hook is missing, hand-edited, not executable, or absent from the lock |
+| `sync.vendored` | error | a vendored estate hook or `[[file]]` is missing, hand-edited, not executable, or absent from the lock |
 | `sync.skills` | error | `.claude/skills` is not a symlink to `../.agents/skills` |
 | `sync.spec` | error | `.agents/estate.lock` or `.agents/hooks.toml` is invalid |
 
@@ -96,6 +96,7 @@ match their sources, so a hand edit to a rendered file shows up in CI.
 | `.agents/hooks.toml`: `[[hook]]` with `id`, optional `run` and `timeout`, and `events = [{ on, tools }]` | `.claude/settings.json`, only the `hooks` key and `env.CLAUDE_WS_ORG`; every other key is left alone |
 | `.agents/estate.lock`: `org`, `targets`, the agent-estate commit, and a sha256 for each vendored hook | `.agents/hooks/<id>.sh`, estate hooks copied from agent-estate |
 | `.agents/skills/` | `.claude/skills` → `../.agents/skills` |
+| `.agents/estate.lock`: `[[file]]` with `path`, `source` (a repo), optional `from` (its path there), and `sha256`; `[sources]` records each source's commit | the file at `path`, copied byte-for-byte from the source (a shared workflow, a shared skill) |
 
 Events are `session_start`, `pre_tool`, `post_tool` and `stop`. Tool classes are
 `edit`, `write`, `notebook` and `bash`. A hook with `run` is repo-local; a hook
@@ -105,8 +106,15 @@ without it is an estate hook, vendored at `.agents/hooks/<id>.sh`.
 ./estate-sync.py --init --estate ../agent-estate PATH   # convert today's .claude/settings.json hooks
 ./estate-sync.py PATH                                   # re-render after editing hooks.toml or the lock
 ./estate-sync.py --estate ../agent-estate PATH          # also pull newer estate hooks, updating the lock
+./estate-sync.py --source rarebit-one/.github=../dotgithub PATH   # refresh [[file]]s from that checkout
 ./estate-sync.py --check PATH                           # drift only; exit 1 on any
 ```
+
+A `[[file]]` entry is how one org's canonical workflow or skill is shared with
+another org's repo without cross-org `uses:` or hand-copying. Edit the file at
+its source, then run `--source` in each consumer and commit. CI fails a hand
+edit in a consumer as `sync.vendored`. A repo that vendors files but renders no
+agent config sets `targets = []`.
 
 The only target so far is `claude`. The loaders for Codex, opencode and qwen
 are added one at a time, each once that vendor's loading has been checked. For

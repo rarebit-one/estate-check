@@ -27,7 +27,7 @@ Exit 1 when any `error` finding exists (unless --report). Rules, by id:
   hooks.drift          a committed hook copy differs from the canonical copy (needs --hooks-dir)
   hooks.dangling       a hook symlink resolves to nothing (workspace mode)
   sync.drift           a file estate-sync renders differs from its canonical source
-  sync.vendored        a vendored estate hook is missing, edited, or not in the lock
+  sync.vendored        a vendored estate hook or [[file]] is missing, edited, or not in the lock
   sync.skills          .claude/skills is not the link to .agents/skills
   sync.spec            .agents/estate.lock or .agents/hooks.toml is invalid
                        (sync.* rules run only in repos that have .agents/estate.lock)

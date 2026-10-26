@@ -201,5 +201,61 @@ class Specs(unittest.TestCase):
             es.sync(d)
 
 
+class VendoredFiles(unittest.TestCase):
+    """[[file]] entries: a file copied byte-for-byte from another repo and hash-locked."""
+
+    LOCK = (
+        'version = 1\ntargets = []\n\n'
+        '[[file]]\npath = ".github/workflows/deploy-production.yml"\nsource = "rarebit-one/.github"\n\n'
+        '[[file]]\npath = ".agents/skills/release/SKILL.md"\nsource = "rarebit-one/.github"\nfrom = "skills/release/SKILL.md"\n'
+    )
+
+    def setUp(self):
+        self.src = tree({".github/workflows/deploy-production.yml": "name: deploy v1\n",
+                         "skills/release/SKILL.md": "---\nname: release\n---\n"})
+        subprocess.run(["git", "init", "-q", str(self.src)], check=True)
+        subprocess.run(["git", "-C", str(self.src), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                        "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        self.repo = tree({".agents/estate.lock": self.LOCK})
+
+    def vendor(self):
+        return es.sync(self.repo, sources={"rarebit-one/.github": str(self.src)})
+
+    def test_vendor_then_check_is_clean(self):
+        changed = self.vendor()
+        self.assertIn(".github/workflows/deploy-production.yml", changed)
+        self.assertEqual((self.repo / ".agents/skills/release/SKILL.md").read_text(), "---\nname: release\n---\n")
+        lock = es.load_lock(self.repo)
+        self.assertTrue(all(f["sha256"].startswith("sha256:") for f in lock["files"]))
+        self.assertRegex(lock["sources"]["rarebit-one/.github"], r"^[0-9a-f]{40}$")
+        self.assertEqual(es.check(self.repo), [])
+        self.assertFalse((self.repo / ".claude/settings.json").exists(), "targets = [] renders nothing for Claude")
+        self.assertEqual(self.vendor(), [], "a second run is a no-op")
+
+    def test_hand_edit_is_caught(self):
+        self.vendor()
+        (self.repo / ".github/workflows/deploy-production.yml").write_text("name: deploy, edited\n")
+        msgs = [f["message"] for f in es.check(self.repo) if f["rule"] == "sync.vendored"]
+        self.assertTrue(any("rarebit-one/.github:.github/workflows/deploy-production.yml" in m for m in msgs), msgs)
+
+    def test_missing_file_and_missing_hash_are_caught(self):
+        self.assertEqual({f["rule"] for f in es.check(self.repo)}, {"sync.vendored"})  # never vendored: no hashes
+        self.vendor()
+        (self.repo / ".agents/skills/release/SKILL.md").unlink()
+        self.assertIn("sync.vendored", rules(self.repo))
+
+    def test_source_update_flows_through(self):
+        self.vendor()
+        (self.src / ".github/workflows/deploy-production.yml").write_text("name: deploy v2\n")
+        self.assertEqual(self.vendor(), [".github/workflows/deploy-production.yml", ".agents/estate.lock"])
+        self.assertEqual(es.check(self.repo), [])
+
+    def test_unknown_source_and_bad_paths_are_spec_errors(self):
+        with self.assertRaises(es.SpecError):
+            es.sync(self.repo, sources={"someone/else": str(self.src)})
+        (self.repo / ".agents/estate.lock").write_text('version = 1\ntargets = []\n[[file]]\npath = "../x"\nsource = "a"\n')
+        self.assertEqual(rules(self.repo), {"sync.spec"})
+
+
 if __name__ == "__main__":
     unittest.main()

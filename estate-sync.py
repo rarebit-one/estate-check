@@ -7,11 +7,14 @@ Stdlib only (Python 3.11+ for tomllib), so it runs anywhere estate-check does.
   estate-sync.py --check [PATH]            # report drift, write nothing (exit 1 on drift)
   estate-sync.py --estate DIR [PATH]       # also refresh vendored estate hooks from DIR
                                            #   (an agent-estate checkout; records its HEAD)
+  estate-sync.py --source REPO=DIR [PATH]  # also refresh the [[file]] entries sourced from
+                                           #   REPO out of the checkout at DIR (repeatable)
   estate-sync.py --init --estate DIR [PATH]  # write .agents/hooks.toml + estate.lock from
                                            #   today's .claude/settings.json registrations
 
 Canonical (hand-written):
-  .agents/estate.lock    TOML: org, targets, estate {repo, sha}, [vendored] id = "sha256:…"
+  .agents/estate.lock    TOML: org, targets, estate {repo, sha}, [vendored] id = "sha256:…",
+                         [sources] repo = "<sha>", [[file]] path, source, from?, sha256
   .agents/hooks.toml     TOML: [[hook]] id, run?, timeout?, events = [{on, tools?}]
   .agents/skills/        skills, one directory each
 
@@ -20,6 +23,8 @@ Rendered (committed; `--check` fails when they drift):
                          lock sets `org`. Every other key (permissions, plugins, …) is kept.
   .agents/hooks/<id>.sh  estate hooks, vendored; their sha256 must match the lock
   .claude/skills         a symlink to ../.agents/skills
+  [[file]] paths         any file vendored byte-for-byte from another repo (a shared workflow,
+                         a shared skill); its sha256 must match the lock. Edit it at the source.
 
 A hook with `run` is repo-local and runs from that path. A hook without `run` is an
 estate hook, vendored at .agents/hooks/<id>.sh.
@@ -88,7 +93,28 @@ def load_lock(root):
     vendored = lock.get("vendored", {})
     if not isinstance(vendored, dict):
         raise SpecError(f"{LOCK}: [vendored] must be a table")
-    return {"org": org, "targets": targets, "estate": lock.get("estate", {}), "vendored": dict(vendored)}
+    sources = lock.get("sources", {})
+    if not isinstance(sources, dict):
+        raise SpecError(f"{LOCK}: [sources] must be a table")
+    files, seen = [], set()
+    for i, f in enumerate(lock.get("file", [])):
+        where = f"{LOCK}: file #{i + 1}"
+        path, source, frm, digest = f.get("path"), f.get("source"), f.get("from"), f.get("sha256")
+        for name, val in (("path", path), ("from", frm)):
+            if val is not None and (not isinstance(val, str) or not val or val.startswith("/") or ".." in Path(val).parts):
+                raise SpecError(f"{where}: `{name}` must be a repo-relative path")
+        if path is None:
+            raise SpecError(f"{where}: `path` is required")
+        if path in seen:
+            raise SpecError(f"{where}: duplicate path {path!r}")
+        seen.add(path)
+        if not isinstance(source, str) or not source:
+            raise SpecError(f"{where} ({path}): `source` must name the repo it is vendored from")
+        if digest is not None and (not isinstance(digest, str) or not digest.startswith("sha256:")):
+            raise SpecError(f"{where} ({path}): `sha256` must look like \"sha256:<hex>\"")
+        files.append({"path": path, "source": source, "from": frm, "sha256": digest})
+    return {"org": org, "targets": targets, "estate": lock.get("estate", {}), "vendored": dict(vendored),
+            "sources": dict(sources), "files": files}
 
 
 def load_hooks(root):
@@ -187,6 +213,14 @@ def dump_lock(lock):
     if lock["estate"]:
         lines += ["", "[estate]"] + [f"{k} = {q(v)}" for k, v in lock["estate"].items()]
     lines += ["", "[vendored]"] + [f"{q(k)} = {q(v)}" for k, v in sorted(lock["vendored"].items())]
+    if lock.get("sources"):
+        lines += ["", "[sources]"] + [f"{q(k)} = {q(v)}" for k, v in sorted(lock["sources"].items())]
+    for f in lock.get("files", []):
+        lines += ["", "[[file]]", f"path = {q(f['path'])}", f"source = {q(f['source'])}"]
+        if f["from"]:
+            lines.append(f"from = {q(f['from'])}")
+        if f["sha256"]:
+            lines.append(f"sha256 = {q(f['sha256'])}")
     return "\n".join(lines) + "\n"
 
 
@@ -238,6 +272,16 @@ def check(root):
             out.append(finding("sync.vendored", "error", rel, None, "not executable"))
     for hid in sorted(set(lock["vendored"]) - estate_ids):
         out.append(finding("sync.vendored", "error", LOCK, None, f"[vendored] lists {hid!r}, which no hook uses"))
+    # vendored files: present and hash-locked
+    for f in lock["files"]:
+        p = root / f["path"]
+        src = f"{f['source']}:{f['from'] or f['path']}"
+        if not p.is_file():
+            out.append(finding("sync.vendored", "error", f["path"], None, f"vendored file is missing; run `estate-sync --source {f['source']}=<checkout>`"))
+        elif not f["sha256"]:
+            out.append(finding("sync.vendored", "error", LOCK, None, f"no sha256 for {f['path']!r}"))
+        elif sha256(p) != f["sha256"]:
+            out.append(finding("sync.vendored", "error", f["path"], None, f"content differs from the hash locked in {LOCK}; edit it at {src}, not here"))
     for h in hooks:
         if h["run"] and not (root / h["run"]).is_file():
             out.append(finding("sync.spec", "error", HOOKS, None, f"{h['id']}: `run` path {h['run']} does not exist"))
@@ -296,7 +340,33 @@ def vendor(root, lock, hooks, estate):
         lock["estate"] = {"repo": lock["estate"].get("repo", "rarebit-one/agent-estate"), "sha": head}
 
 
-def sync(root, estate=None):
+def vendor_files(root, lock, sources):
+    """Copy each [[file]] whose source is in `sources` ({repo: checkout dir}); returns changed paths."""
+    changed = []
+    for name, d in sources.items():
+        entries = [f for f in lock["files"] if f["source"] == name]
+        if not entries:
+            raise SpecError(f"--source {name}: no [[file]] in {LOCK} comes from it")
+        for f in entries:
+            src = Path(d) / (f["from"] or f["path"])
+            if not src.is_file():
+                raise SpecError(f"{f['path']}: source {name}:{f['from'] or f['path']} not found at {src}")
+            dst = root / f["path"]
+            old = dst.read_bytes() if dst.is_file() else None
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+            if os.access(src, os.X_OK):
+                dst.chmod(0o755)
+            f["sha256"] = sha256(dst)
+            if old != dst.read_bytes():
+                changed.append(f["path"])
+        head = git_head(d)
+        if head:
+            lock["sources"][name] = head
+    return changed
+
+
+def sync(root, estate=None, sources=None):
     """Write every rendered file. Returns the repo-relative paths it changed."""
     root = Path(root)
     lock, hooks = load_lock(root), load_hooks(root)
@@ -316,6 +386,9 @@ def sync(root, estate=None):
             rel = f"{VENDOR_DIR}/{hid}.sh"
             if before.get(rel) != (root / rel).read_bytes():
                 changed.append(rel)
+    if sources:
+        changed += vendor_files(root, lock, sources)
+    if estate or sources:
         write(LOCK, dump_lock(lock))
 
     if "claude" in lock["targets"]:
@@ -384,7 +457,7 @@ def init(root, estate):
                     by_id[hid]["events"].append(ev)
     (root / ".agents").mkdir(exist_ok=True)
     (root / HOOKS).write_text(dump_hooks(hooks))
-    (root / LOCK).write_text(dump_lock({"org": settings.get("env", {}).get("CLAUDE_WS_ORG"), "targets": ["claude"], "estate": {}, "vendored": {}}))
+    (root / LOCK).write_text(dump_lock({"org": settings.get("env", {}).get("CLAUDE_WS_ORG"), "targets": ["claude"], "estate": {}, "vendored": {}, "sources": {}, "files": []}))
     for rel in superseded:  # the old per-repo copies; the vendored ones replace them
         (root / rel).unlink(missing_ok=True)
     changed = [HOOKS, LOCK] + superseded
@@ -396,6 +469,8 @@ def main():
     ap.add_argument("path", nargs="?", default=".")
     ap.add_argument("--check", action="store_true", help="report drift and exit 1 on any; write nothing")
     ap.add_argument("--estate", help="agent-estate checkout to vendor estate hooks from")
+    ap.add_argument("--source", action="append", default=[], metavar="REPO=DIR",
+                    help="checkout of REPO to vendor its [[file]] entries from (repeatable)")
     ap.add_argument("--init", action="store_true", help="create hooks.toml + estate.lock from .claude/settings.json (needs --estate)")
     a = ap.parse_args()
     try:
@@ -408,7 +483,13 @@ def main():
             sys.exit(1 if any(f["severity"] == "error" for f in res) else 0)
         if a.init and not a.estate:
             ap.error("--init needs --estate")
-        changed = init(a.path, a.estate) if a.init else sync(a.path, a.estate)
+        sources = {}
+        for s in a.source:
+            name, sep, d = s.partition("=")
+            if not sep or not name or not d:
+                ap.error(f"--source expects REPO=DIR, got {s!r}")
+            sources[name] = d
+        changed = init(a.path, a.estate) if a.init else sync(a.path, a.estate, sources)
     except SpecError as e:
         print(f"estate-sync: {e}", file=sys.stderr)
         sys.exit(2)
