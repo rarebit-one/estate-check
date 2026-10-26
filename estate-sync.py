@@ -352,13 +352,13 @@ def vendor_files(root, lock, sources):
             if not src.is_file():
                 raise SpecError(f"{f['path']}: source {name}:{f['from'] or f['path']} not found at {src}")
             dst = root / f["path"]
-            old = dst.read_bytes() if dst.is_file() else None
+            old = (dst.read_bytes(), os.access(dst, os.X_OK)) if dst.is_file() else None
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dst)
-            if os.access(src, os.X_OK):
-                dst.chmod(0o755)
+            # Follow the source's executable bit both ways; copyfile keeps dst's mode.
+            dst.chmod(0o755 if os.access(src, os.X_OK) else 0o644)
             f["sha256"] = sha256(dst)
-            if old != dst.read_bytes():
+            if old != (dst.read_bytes(), os.access(dst, os.X_OK)):
                 changed.append(f["path"])
         head = git_head(d)
         if head:
